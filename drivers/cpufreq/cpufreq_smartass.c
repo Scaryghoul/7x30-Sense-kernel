@@ -62,7 +62,7 @@ static unsigned int suspended;
 * The minimum amount of time to spend at a frequency before we can ramp down,
 * default is 45ms.
 */
-#define DEFAULT_DOWN_RATE_US 99000;
+#define DEFAULT_DOWN_RATE_US 45000;
 static unsigned long down_rate_us;
 
 /*
@@ -70,7 +70,7 @@ static unsigned long down_rate_us;
 * Zero disables. Set a very high value to jump to policy max freqeuncy.
 */
 // default 999999
-#define DEFAULT_UP_MIN_FREQ 0
+#define DEFAULT_UP_MIN_FREQ 806400
 static unsigned int up_min_freq;
 
 /*
@@ -79,7 +79,8 @@ static unsigned int up_min_freq;
 * to minimize wakeup issues.
 * Set sleep_max_freq=0 to disable this behavior.
 */
-#define DEFAULT_SLEEP_MAX_FREQ CONFIG_MSM_CPU_FREQ_ONDEMAND_MIN
+//#define DEFAULT_SLEEP_MAX_FREQ CONFIG_MSM_CPU_FREQ_ONDEMAND_MIN
+#define DEFAULT_SLEEP_MAX_FREQ 245760
 static unsigned int sleep_max_freq;
 
 /*
@@ -98,21 +99,21 @@ static unsigned int ramp_up_step;
 /*
 * Max freqeuncy delta when ramping down. zero disables.
 */
-#define DEFAULT_MAX_RAMP_DOWN 384000
+#define DEFAULT_MAX_RAMP_DOWN 0
 static unsigned int max_ramp_down;
 
 /*
 * CPU freq will be increased if measured load > max_cpu_load;
 */
 // default 80
-#define DEFAULT_MAX_CPU_LOAD 55
+#define DEFAULT_MAX_CPU_LOAD 90
 static unsigned long max_cpu_load;
 
 /*
 * CPU freq will be decreased if measured load < min_cpu_load;
 */
 // default 30
-#define DEFAULT_MIN_CPU_LOAD 35
+#define DEFAULT_MIN_CPU_LOAD 60
 static unsigned long min_cpu_load;
 
 
@@ -626,4 +627,5 @@ module_exit(cpufreq_smartass_exit);
 MODULE_AUTHOR ("Erasmux");
 MODULE_DESCRIPTION ("'cpufreq_smartass' - A smart cpufreq governor");
 MODULE_LICENSE ("GPL");
+
 

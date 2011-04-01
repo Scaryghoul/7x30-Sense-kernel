@@ -1,15 +1,8 @@
 /*
- *  drivers/cpufreq/cpufreq_conservative.c
- *
- *  Copyright (C)  2001 Russell King
- *            (C)  2003 Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>.
- *                      Jun Nakajima <jun.nakajima@intel.com>
- *            (C)  2009 Alexander Clouter <alex@digriz.org.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
+        Scary governor based off of conservatives source with some of smartasses features
+        
+        For devs - If you're going to port this driver to other devices, make sure to edit the default sleep frequencies & prev frequencies or else you might be going outside your devices hardware limits.
+*/
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -23,14 +16,27 @@
 #include <linux/tick.h>
 #include <linux/ktime.h>
 #include <linux/sched.h>
+#include <linux/earlysuspend.h>
+#include <asm/cputime.h>
+#include <linux/cpumask.h>
+#include <linux/timer.h>
 
 /*
  * dbs is used in this file as a shortform for demandbased switching
  * It helps to keep variable names smaller, simpler
  */
 
-#define DEF_FREQUENCY_UP_THRESHOLD		(85)
-#define DEF_FREQUENCY_DOWN_THRESHOLD		(60)
+#define DEF_FREQUENCY_UP_THRESHOLD		(80)
+#define DEF_FREQUENCY_DOWN_THRESHOLD		(45)
+#define DEFAULT_SLEEP_MAX_FREQ 245760
+#define DEFAULT_SLEEP_MIN_FREQ 122880
+#define DEFAULT_SLEEP_PREV_FREQ 122880 //This is so that if there are any issues resulting in sleep_prev_freq getting set, there will be a backup freq
+#define DEFAULT_PREV_MAX 614400
+static unsigned int suspended;
+static unsigned int sleep_max_freq=DEFAULT_SLEEP_MAX_FREQ;
+static unsigned int sleep_min_freq=DEFAULT_SLEEP_MIN_FREQ;
+static unsigned int sleep_prev_freq=DEFAULT_SLEEP_PREV_FREQ;
+static unsigned int sleep_prev_max=DEFAULT_PREV_MAX;
 
 /*
  * The polling frequency of this governor depends on the capability of
@@ -51,6 +57,7 @@ static unsigned int min_sampling_rate;
 #define DEF_SAMPLING_DOWN_FACTOR		(1)
 #define MAX_SAMPLING_DOWN_FACTOR		(10)
 #define TRANSITION_LATENCY_LIMIT		(10 * 1000 * 1000)
+
 
 static void do_dbs_timer(struct work_struct *work);
 
@@ -355,13 +362,82 @@ static struct attribute *dbs_attributes[] = {
 
 static struct attribute_group dbs_attr_group = {
 	.attrs = dbs_attributes,
-	.name = "conservative",
+	.name = "scary",
 };
 
 /************************** sysfs end ************************/
 
+/********** Porting smartass code for suspension**********/
+static void smartass_suspend(int cpu, int suspend)
+{
+    struct cpu_dbs_info_s *this_smartass = &per_cpu(cs_cpu_dbs_info, smp_processor_id());
+    struct cpufreq_policy *policy = this_smartass->cur_policy;
+    unsigned int new_freq;
+
+    if (!this_smartass->enable || sleep_max_freq==0) // disable behavior for sleep_max_freq==0
+        return;
+
+    if (suspend) 
+    {
+        //If the current min speed is greater than the max sleep, we reset the min to 120mhz, for battery savings
+            if (policy->min >= sleep_max_freq)
+            {
+                sleep_prev_freq=policy->min;
+                policy->min= sleep_min_freq;
+            }
+            if (policy->max > sleep_max_freq)
+            {
+                sleep_prev_max=policy->max;
+                policy->max=sleep_max_freq;
+            }
+        if (policy->cur > sleep_max_freq) 
+        {
+            new_freq = sleep_max_freq;
+            if (new_freq > policy->max)
+                new_freq = policy->max;
+            if (new_freq < policy->min)
+                new_freq = policy->min;
+            __cpufreq_driver_target(policy, new_freq,CPUFREQ_RELATION_H);
+       }
+       
+    }
+    else //Resetting the min speed
+    {
+        if (policy->min < sleep_prev_freq)
+            policy->min=sleep_prev_freq;
+        if (policy->max < sleep_prev_max)
+            policy->max=sleep_prev_max;
+    }
+    
+}
+
+static void smartass_early_suspend(struct early_suspend *handler) 
+{
+    int i;
+    suspended = 1;
+    for_each_online_cpu(i)
+    smartass_suspend(i,1);
+}
+
+static void smartass_late_resume(struct early_suspend *handler) 
+{
+    int i;
+    suspended = 0;
+    for_each_online_cpu(i)
+    smartass_suspend(i,0);
+}
+
+static struct early_suspend smartass_power_suspend = 
+{
+    .suspend = smartass_early_suspend,
+    .resume = smartass_late_resume,
+};
+
+
 static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 {
+    //Current freq
+//    unsigned int new_freq;
 	unsigned int load = 0;
 	unsigned int freq_target;
 
@@ -430,27 +506,26 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 		return;
 
 	/* Check for frequency increase */
-	if (load > dbs_tuners_ins.up_threshold) {
+	if (load > dbs_tuners_ins.up_threshold) 
+    {
 		this_dbs_info->down_skip = 0;
 
 		/* if we are already at full speed then break out early */
-		if (this_dbs_info->requested_freq == policy->max)
-			return;
+   		if (this_dbs_info->requested_freq == policy->max)
+   			return;
+   		freq_target = (dbs_tuners_ins.freq_step * policy->max) / 100;
+   		/* max freq cannot be less than 100. but who knows.... */
+   		if (unlikely(freq_target == 0))
+   			freq_target = 5;
+    
+   		this_dbs_info->requested_freq += freq_target;
+   		if (this_dbs_info->requested_freq > policy->max)
+   			this_dbs_info->requested_freq = policy->max;
 
-		freq_target = (dbs_tuners_ins.freq_step * policy->max) / 100;
+        __cpufreq_driver_target(policy, this_dbs_info->requested_freq,CPUFREQ_RELATION_H);
 
-		/* max freq cannot be less than 100. But who knows.... */
-		if (unlikely(freq_target == 0))
-			freq_target = 5;
-
-		this_dbs_info->requested_freq += freq_target;
-		if (this_dbs_info->requested_freq > policy->max)
-			this_dbs_info->requested_freq = policy->max;
-
-		__cpufreq_driver_target(policy, this_dbs_info->requested_freq,
-			CPUFREQ_RELATION_H);
-		return;
-	}
+   		return;
+    }
 
 	/*
 	 * The optimal frequency is the frequency that is the lowest that
@@ -520,6 +595,7 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 	struct cpu_dbs_info_s *this_dbs_info;
 	unsigned int j;
 	int rc;
+    suspended=0;
 
 	this_dbs_info = &per_cpu(cs_cpu_dbs_info, cpu);
 
@@ -625,11 +701,11 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 	return 0;
 }
 
-#ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE
+#ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_Scary
 static
 #endif
-struct cpufreq_governor cpufreq_gov_conservative = {
-	.name			= "BatterySave!",
+struct cpufreq_governor cpufreq_gov_scary = {
+	.name			= "Scary",
 	.governor		= cpufreq_governor_dbs,
 	.max_transition_latency	= TRANSITION_LATENCY_LIMIT,
 	.owner			= THIS_MODULE,
@@ -644,8 +720,8 @@ static int __init cpufreq_gov_dbs_init(void)
 		printk(KERN_ERR "Creation of kconservative failed\n");
 		return -EFAULT;
 	}
-
-	err = cpufreq_register_governor(&cpufreq_gov_conservative);
+    register_early_suspend(&smartass_power_suspend);
+	err = cpufreq_register_governor(&cpufreq_gov_scary);
 	if (err)
 		destroy_workqueue(kconservative_wq);
 
@@ -654,18 +730,12 @@ static int __init cpufreq_gov_dbs_init(void)
 
 static void __exit cpufreq_gov_dbs_exit(void)
 {
-	cpufreq_unregister_governor(&cpufreq_gov_conservative);
+	cpufreq_unregister_governor(&cpufreq_gov_scary);
 	destroy_workqueue(kconservative_wq);
 }
 
 
-MODULE_AUTHOR("Alexander Clouter <alex@digriz.org.uk>");
-MODULE_DESCRIPTION("'cpufreq_conservative' - A dynamic cpufreq governor for "
-		"Low Latency Frequency Transition capable processors "
-		"optimised for use in a battery environment");
-MODULE_LICENSE("GPL");
-
-#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE
+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_SCARY
 fs_initcall(cpufreq_gov_dbs_init);
 #else
 module_init(cpufreq_gov_dbs_init);
